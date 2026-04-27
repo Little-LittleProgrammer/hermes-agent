@@ -414,6 +414,121 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_edit_message_sends_new_message_when_edit_fails(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {"update_called": False, "send_called": False}
+
+        class _MessageAPI:
+            def update(self, request):
+                captured["update_called"] = True
+                # Code 230072: message has reached max edit count (20 times)
+                return SimpleNamespace(
+                    success=lambda: False,
+                    code=230072,
+                    msg="The message has reached the number of times it can be edited."
+                )
+
+            def create(self, request):
+                captured["send_called"] = True
+                captured["send_request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_new_message"),
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=_MessageAPI(),
+                )
+            )
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_old_message",
+                    content="Updated content",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_new_message")
+        self.assertTrue(captured["update_called"])
+        self.assertTrue(captured["send_called"])
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_edit_message_rotates_after_20_edits(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {"update_count": 0, "send_called": False}
+
+        class _MessageAPI:
+            def update(self, request):
+                captured["update_count"] += 1
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id=request.message_id),
+                )
+
+            def create(self, request):
+                captured["send_called"] = True
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_new_message"),
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=_MessageAPI(),
+                )
+            )
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            # Edit 20 times - should all succeed with update
+            for i in range(20):
+                result = asyncio.run(
+                    adapter.edit_message(
+                        chat_id="oc_chat",
+                        message_id="om_original",
+                        content=f"Edit {i+1}",
+                    )
+                )
+                self.assertTrue(result.success)
+                self.assertEqual(result.message_id, "om_original")
+
+            self.assertEqual(captured["update_count"], 20)
+            self.assertFalse(captured["send_called"])
+
+            # 21st edit should trigger rotation to new message
+            result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_original",
+                    content="Edit 21",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_new_message")
+        self.assertEqual(captured["update_count"], 20)  # No additional update call
+        self.assertTrue(captured["send_called"])
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_get_chat_info_uses_real_feishu_chat_api(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter

@@ -219,7 +219,32 @@ class TestSendOrEditMediaStripping:
         consumer = GatewayStreamConsumer(adapter, "chat_123")
         await consumer._send_or_edit("MEDIA:/tmp/image.png")
 
-        adapter.send.assert_not_called()
+
+class TestRotatedMessageRebase:
+    """Verify rotated stream messages only carry the unseen continuation."""
+
+    @pytest.mark.asyncio
+    async def test_follow_up_edits_target_rotated_tail_only(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+        adapter.edit_message = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="msg_2"),
+            SimpleNamespace(success=True, message_id="msg_2"),
+        ])
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(adapter, "chat_123")
+
+        await consumer._send_or_edit("hello")
+        await consumer._send_or_edit("hello world")
+        await consumer._send_or_edit("hello world again")
+
+        assert consumer._message_id == "msg_2"
+        adapter.send.assert_called_once()
+        assert adapter.edit_message.call_args_list[0].kwargs["message_id"] == "msg_1"
+        assert adapter.edit_message.call_args_list[0].kwargs["content"] == "hello world"
+        assert adapter.edit_message.call_args_list[1].kwargs["message_id"] == "msg_2"
+        assert adapter.edit_message.call_args_list[1].kwargs["content"] == "world again"
 
     @pytest.mark.asyncio
     async def test_cursor_only_update_skips_send(self):

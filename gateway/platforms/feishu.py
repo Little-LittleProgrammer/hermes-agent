@@ -1310,6 +1310,10 @@ class FeishuAdapter(BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
 
     MAX_MESSAGE_LENGTH = 8000
+    # Feishu allows at most 20 edits per message. When the limit is
+    # reached, the adapter rotates to a new message automatically so
+    # progressive streaming can continue without interruption.
+    MAX_EDITS_PER_MESSAGE = 3
     # Threshold for detecting Feishu client-side message splits.
     # When a chunk is near the ~4096-char practical limit, a continuation
     # is almost certain.
@@ -1350,6 +1354,10 @@ class FeishuAdapter(BasePlatformAdapter):
         self._chat_locks: Dict[str, asyncio.Lock] = {}  # chat_id → lock (per-chat serial processing)
         self._sent_message_ids_to_chat: Dict[str, str] = {}  # message_id → chat_id (for reaction routing)
         self._sent_message_id_order: List[str] = []  # LRU order for _sent_message_ids_to_chat
+        self._edit_counts: Dict[str, int] = {}  # message_id → edit count (MAX_EDITS_PER_MESSAGE cap)
+        self._edit_count_order: List[str] = []  # LRU order for _edit_counts
+        self._sent_text_by_message_id: Dict[str, str] = {}  # message_id → visible text content
+        self._sent_text_order: List[str] = []  # LRU order for _sent_text_by_message_id
         self._chat_info_cache: Dict[str, Dict[str, Any]] = {}
         self._message_text_cache: Dict[str, Optional[str]] = {}
         self._app_lock_identity: Optional[str] = None
@@ -1627,6 +1635,46 @@ class FeishuAdapter(BasePlatformAdapter):
             self._webhook_runner = None
             self._webhook_site = None
 
+    def _remember_edit_count(self, message_id: str, count: int) -> None:
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            return
+        self._edit_counts[normalized] = count
+        if normalized in self._edit_count_order:
+            self._edit_count_order.remove(normalized)
+        self._edit_count_order.append(normalized)
+        if len(self._edit_count_order) > 100:
+            oldest = self._edit_count_order.pop(0)
+            self._edit_counts.pop(oldest, None)
+
+    def _clear_edit_count(self, message_id: str) -> None:
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            return
+        self._edit_counts.pop(normalized, None)
+        if normalized in self._edit_count_order:
+            self._edit_count_order.remove(normalized)
+
+    def _remember_sent_text(self, message_id: Optional[str], content: str) -> None:
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            return
+        self._sent_text_by_message_id[normalized] = content
+        if normalized in self._sent_text_order:
+            self._sent_text_order.remove(normalized)
+        self._sent_text_order.append(normalized)
+        if len(self._sent_text_order) > _FEISHU_BOT_MSG_TRACK_SIZE:
+            oldest = self._sent_text_order.pop(0)
+            self._sent_text_by_message_id.pop(oldest, None)
+
+    def _continuation_after_visible_prefix(self, message_id: str, content: str) -> str:
+        previous = self._sent_text_by_message_id.get(str(message_id or "").strip(), "")
+        if previous and content.startswith(previous):
+            continuation = content[len(previous):].lstrip()
+            if continuation.strip():
+                return continuation
+        return content
+
     # =========================================================================
     # Outbound — send / edit / send_image / send_voice / …
     # =========================================================================
@@ -1645,10 +1693,12 @@ class FeishuAdapter(BasePlatformAdapter):
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         last_response = None
+        last_visible_chunk = ""
 
         try:
             for chunk in chunks:
                 msg_type, payload = self._build_outbound_payload(chunk)
+                visible_chunk = chunk
                 try:
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
@@ -1661,10 +1711,11 @@ class FeishuAdapter(BasePlatformAdapter):
                     if msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
                         raise
                     logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
+                    visible_chunk = _strip_markdown_to_plain_text(chunk)
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
                         msg_type="text",
-                        payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
+                        payload=json.dumps({"text": visible_chunk}, ensure_ascii=False),
                         reply_to=reply_to,
                         metadata=metadata,
                     )
@@ -1674,16 +1725,21 @@ class FeishuAdapter(BasePlatformAdapter):
                     and _POST_CONTENT_INVALID_RE.search(str(getattr(response, "msg", "") or ""))
                 ):
                     logger.warning("[Feishu] Post payload rejected by API response; falling back to plain text")
+                    visible_chunk = _strip_markdown_to_plain_text(chunk)
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
                         msg_type="text",
-                        payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
+                        payload=json.dumps({"text": visible_chunk}, ensure_ascii=False),
                         reply_to=reply_to,
                         metadata=metadata,
                     )
                 last_response = response
+                last_visible_chunk = visible_chunk
 
-            return self._finalize_send_result(last_response, "send failed")
+            result = self._finalize_send_result(last_response, "send failed")
+            if result.success and result.message_id:
+                self._remember_sent_text(result.message_id, last_visible_chunk or formatted)
+            return result
         except Exception as exc:
             logger.error("[Feishu] Send error: %s", exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
@@ -1696,28 +1752,62 @@ class FeishuAdapter(BasePlatformAdapter):
         *,
         finalize: bool = False,
     ) -> SendResult:
-        """Edit a previously sent Feishu text/post message."""
+        """Edit a previously sent Feishu text/post message.
+
+        Feishu allows at most 20 edits per message. When the limit is
+        reached, this method automatically rotates to a new message so
+        progressive streaming can continue without interruption.
+        """
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
-        content = self.format_message(content)
+        edit_count = self._edit_counts.get(message_id, 0)
+        formatted_content = self.format_message(content)
+
+        if edit_count >= self.MAX_EDITS_PER_MESSAGE:
+            logger.info(
+                "[Feishu] Edit limit (%d) reached for %s; rotating to new message",
+                self.MAX_EDITS_PER_MESSAGE, message_id,
+            )
+            self._clear_edit_count(message_id)
+            rotated_content = self._continuation_after_visible_prefix(message_id, formatted_content)
+            result = await self.send(chat_id=chat_id, content=rotated_content)
+            return result
+
         try:
-            msg_type, payload = self._build_outbound_payload(content)
+            msg_type, payload = self._build_outbound_payload(formatted_content)
+            visible_content = formatted_content
             body = self._build_update_message_body(msg_type=msg_type, content=payload)
             request = self._build_update_message_request(message_id=message_id, request_body=body)
             response = await asyncio.to_thread(self._client.im.v1.message.update, request)
             result = self._finalize_send_result(response, "update failed")
             if not result.success and msg_type == "post" and _POST_CONTENT_INVALID_RE.search(result.error or ""):
                 logger.warning("[Feishu] Invalid post update payload rejected by API; falling back to plain text")
+                visible_content = _strip_markdown_to_plain_text(formatted_content)
                 fallback_body = self._build_update_message_body(
                     msg_type="text",
-                    content=json.dumps({"text": _strip_markdown_to_plain_text(content)}, ensure_ascii=False),
+                    content=json.dumps({"text": visible_content}, ensure_ascii=False),
                 )
                 fallback_request = self._build_update_message_request(message_id=message_id, request_body=fallback_body)
                 fallback_response = await asyncio.to_thread(self._client.im.v1.message.update, fallback_request)
                 result = self._finalize_send_result(fallback_response, "update failed")
             if result.success:
+                self._remember_edit_count(message_id, edit_count + 1)
+                self._remember_sent_text(message_id, visible_content)
                 result.message_id = message_id
+                return result
+            # Fallback: Code 230072 means message reached max edit count
+            # This shouldn't happen with proactive rotation, but handle it as safety net
+            response_code = getattr(result.raw_response, "code", None)
+            if response_code == 230072:
+                logger.warning(
+                    "[Feishu] Message %s hit edit limit (code 230072) despite counter. Sending new message.",
+                    message_id
+                )
+                self._clear_edit_count(message_id)
+                rotated_content = self._continuation_after_visible_prefix(message_id, visible_content)
+                new_result = await self.send(chat_id=chat_id, content=rotated_content)
+                return new_result
             return result
         except Exception as exc:
             logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)

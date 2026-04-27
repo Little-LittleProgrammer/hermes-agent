@@ -109,6 +109,9 @@ class GatewayStreamConsumer:
         self._edit_supported = True  # Disabled when progressive edits are no longer usable
         self._last_edit_time = 0.0
         self._last_sent_text = ""   # Track last-sent text to skip redundant edits
+        # Portion of the full accumulated reply already shown in earlier
+        # rotated messages and therefore excluded from the active message.
+        self._message_prefix = ""
         self._fallback_final_send = False
         self._fallback_prefix = ""
         self._flood_strikes = 0         # Consecutive flood-control edit failures
@@ -153,6 +156,7 @@ class GatewayStreamConsumer:
         self._message_created_ts = None
         self._accumulated = ""
         self._last_sent_text = ""
+        self._message_prefix = ""
         self._fallback_final_send = False
         self._fallback_prefix = ""
 
@@ -515,6 +519,7 @@ class GatewayStreamConsumer:
         Returns the message_id so callers can thread subsequent chunks.
         """
         text = self._clean_for_display(text)
+        text = self._content_for_active_message(text)
         if not text.strip():
             return reply_to_id
         try:
@@ -544,9 +549,20 @@ class GatewayStreamConsumer:
             prefix = prefix[:-len(self.cfg.cursor)]
         return self._clean_for_display(prefix)
 
+    def _full_visible_prefix(self) -> str:
+        """Return text already shown across all rotated messages in this segment."""
+        return f"{self._message_prefix}{self._visible_prefix()}"
+
+    def _content_for_active_message(self, text: str, *, prefix: Optional[str] = None) -> str:
+        """Return the slice of text that belongs in the current active message."""
+        effective_prefix = self._clean_for_display(prefix if prefix is not None else self._message_prefix)
+        if not effective_prefix or not text.startswith(effective_prefix):
+            return text
+        return text[len(effective_prefix):].lstrip()
+
     def _continuation_text(self, final_text: str) -> str:
         """Return only the part of final_text the user has not already seen."""
-        prefix = self._fallback_prefix or self._visible_prefix()
+        prefix = self._fallback_prefix or self._full_visible_prefix()
         if prefix and final_text.startswith(prefix):
             return final_text[len(prefix):].lstrip()
         return final_text
@@ -583,7 +599,7 @@ class GatewayStreamConsumer:
             # calculation may wrongly conclude "already shown" because the
             # streamed prefix was from a *previous* segment (before the tool
             # boundary).  In that case, send the full final_text as-is (#10807).
-            if final_text.strip() and final_text != self._visible_prefix():
+            if final_text.strip() and final_text != self._full_visible_prefix():
                 continuation = final_text
             else:
                 # Defence-in-depth for #7183: the last edit may still show the
@@ -689,7 +705,7 @@ class GatewayStreamConsumer:
         """
         if not self._fallback_final_send:
             await self._try_strip_cursor()
-        visible = self._fallback_prefix or self._visible_prefix()
+        visible = self._fallback_prefix or self._full_visible_prefix()
         tail = self._accumulated
         if visible and tail.startswith(visible):
             tail = tail[len(visible):].lstrip()
@@ -838,6 +854,8 @@ class GatewayStreamConsumer:
         # Media files are delivered as native attachments after the stream
         # finishes (via _deliver_media_from_response in gateway/run.py).
         text = self._clean_for_display(text)
+        full_text = text
+        text = self._content_for_active_message(text)
         # A bare streaming cursor is not meaningful user-visible content and
         # can render as a stray tofu/white-box message on some clients.
         visible_without_cursor = text
@@ -892,6 +910,8 @@ class GatewayStreamConsumer:
                         and await self._try_fresh_final(text)
                     ):
                         return True
+                    old_message_id = self._message_id
+                    previous_full_visible = self._full_visible_prefix()
                     # Edit existing message
                     result = await self.adapter.edit_message(
                         chat_id=self.chat_id,
@@ -901,9 +921,21 @@ class GatewayStreamConsumer:
                     )
                     if result.success:
                         self._already_sent = True
-                        self._last_sent_text = text
                         # Successful edit — reset flood strike counter
                         self._flood_strikes = 0
+                        # Adapter may rotate to a new message (e.g. Feishu
+                        # 20-edit limit). Update our tracking so subsequent
+                        # edits target the correct message.
+                        if result.message_id and result.message_id != old_message_id:
+                            self._message_id = result.message_id
+                            self._message_created_ts = time.monotonic()
+                            self._message_prefix = previous_full_visible
+                            self._last_sent_text = self._content_for_active_message(
+                                full_text,
+                                prefix=previous_full_visible,
+                            )
+                        else:
+                            self._last_sent_text = text
                         return True
                     else:
                         # Edit failed.  If this looks like flood control / rate
@@ -936,7 +968,7 @@ class GatewayStreamConsumer:
                             "Edit failed (strikes=%d), entering fallback mode",
                             self._flood_strikes,
                         )
-                        self._fallback_prefix = self._visible_prefix()
+                        self._fallback_prefix = self._full_visible_prefix()
                         self._fallback_final_send = True
                         self._edit_supported = False
                         self._already_sent = True
@@ -967,7 +999,7 @@ class GatewayStreamConsumer:
                     self._already_sent = True
                     self._last_sent_text = text
                     if not result.message_id:
-                        self._fallback_prefix = self._visible_prefix()
+                        self._fallback_prefix = self._full_visible_prefix()
                         self._fallback_final_send = True
                         # Sentinel prevents re-entering the first-send path on
                         # every delta/tool boundary when platforms accept a
