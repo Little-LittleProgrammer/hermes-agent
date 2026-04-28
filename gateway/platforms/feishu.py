@@ -1309,6 +1309,8 @@ def check_feishu_requirements() -> bool:
 class FeishuAdapter(BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
 
+    STREAM_EDIT_ROTATE_BEFORE_LIMIT = 18
+
     MAX_MESSAGE_LENGTH = 8000
     # Threshold for detecting Feishu client-side message splits.
     # When a chunk is near the ~4096-char practical limit, a continuation
@@ -1722,6 +1724,22 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
+
+    @staticmethod
+    def should_rotate_stream_edit_failure(result: SendResult) -> bool:
+        raw_response = getattr(result, "raw_response", None)
+        if getattr(raw_response, "code", None) == 230072:
+            return True
+
+        error_text = str(getattr(result, "error", "") or "")
+        if "[230072]" in error_text:
+            return True
+
+        error_lower = error_text.lower()
+        return (
+            "number of times it can be edited" in error_lower
+            or "超过最大可编辑次数" in error_text
+        )
 
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str,

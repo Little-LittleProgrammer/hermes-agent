@@ -108,6 +108,65 @@ class TestFeishuMessageNormalization(unittest.TestCase):
             "Sprint recap\n- Alice: Please review PR-128\n- Bob: Ship it",
         )
 
+
+class TestFeishuStreamEditRotation(unittest.TestCase):
+    @patch.dict(os.environ, {}, clear=True)
+    def test_should_rotate_stream_edit_failure_on_raw_response_code(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        result = SendResult(
+            success=False,
+            error="update failed",
+            raw_response=SimpleNamespace(code=230072),
+        )
+
+        self.assertTrue(adapter.should_rotate_stream_edit_failure(result))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_should_rotate_stream_edit_failure_on_error_code_text(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        result = SendResult(success=False, error="[230072] The message has reached the number of times it can be edited.")
+
+        self.assertTrue(adapter.should_rotate_stream_edit_failure(result))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_should_rotate_stream_edit_failure_on_english_and_chinese_text(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+
+        english = SendResult(
+            success=False,
+            error="The message has reached the number of times it can be edited.",
+        )
+        chinese = SendResult(
+            success=False,
+            error="消息已超过最大可编辑次数 20 次",
+        )
+
+        self.assertTrue(adapter.should_rotate_stream_edit_failure(english))
+        self.assertTrue(adapter.should_rotate_stream_edit_failure(chinese))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_should_not_rotate_on_unrelated_failure(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        result = SendResult(success=False, error="[230001] content format of the post type is incorrect")
+
+        self.assertFalse(adapter.should_rotate_stream_edit_failure(result))
+
     def test_normalize_share_chat_exposes_summary_and_metadata(self):
         from gateway.platforms.feishu import normalize_feishu_message
 
