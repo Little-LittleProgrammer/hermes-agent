@@ -440,7 +440,12 @@ class FeishuProgressRotationAdapter(ProgressCaptureAdapter):
 
     @staticmethod
     def should_rotate_stream_edit_failure(result) -> bool:
-        return "[230072]" in str(getattr(result, "error", "") or "")
+        raw_response = getattr(result, "raw_response", None)
+        if getattr(raw_response, "code", None) == 230072:
+            return True
+
+        error_text = str(getattr(raw_response, "msg", "") or "")
+        return "number of times it can be edited" in error_text.lower()
 
     async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
         self.sent.append(
@@ -463,9 +468,14 @@ class FeishuProgressRotationAdapter(ProgressCaptureAdapter):
             }
         )
         if len(self.edits) == 2:
+            class MockResponse:
+                code = 230072
+                msg = "The message has reached the number of times it can be edited."
+
             return SendResult(
                 success=False,
                 error="[230072] The message has reached the number of times it can be edited.",
+                raw_response=MockResponse(),
             )
         return SendResult(success=True, message_id=message_id)
 

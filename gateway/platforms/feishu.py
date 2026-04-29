@@ -1731,15 +1731,8 @@ class FeishuAdapter(BasePlatformAdapter):
         if getattr(raw_response, "code", None) == 230072:
             return True
 
-        error_text = str(getattr(result, "error", "") or "")
-        if "[230072]" in error_text:
-            return True
-
-        error_lower = error_text.lower()
-        return (
-            "number of times it can be edited" in error_lower
-            or "超过最大可编辑次数" in error_text
-        )
+        error_text = str(getattr(raw_response, "msg", "") or "")
+        return "number of times it can be edited" in error_text.lower()
 
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str,
