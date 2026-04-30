@@ -106,7 +106,7 @@ hermes chat -q "Hello"
 ### Run tests
 
 ```bash
-pytest tests/ -v
+scripts/run_tests.sh -v
 ```
 
 ---
@@ -595,7 +595,7 @@ refactor/description   # Code restructuring
 
 ### Before submitting
 
-1. **Run tests**: `pytest tests/ -v`
+1. **Run tests**: `scripts/run_tests.sh -v`
 2. **Test manually**: Run `hermes` and exercise the code path you changed
 3. **Check cross-platform impact**: If you touch file I/O, process management, or terminal handling, consider macOS, Linux, and WSL2
 4. **Keep PRs focused**: One logical change per PR. Don't mix a bug fix with a refactor with a new feature.

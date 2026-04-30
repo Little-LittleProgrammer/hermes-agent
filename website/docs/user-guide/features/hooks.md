@@ -49,9 +49,9 @@ The `events` list determines which events trigger your handler. You can subscrib
 ```python
 import json
 from datetime import datetime
-from pathlib import Path
+from hermes_constants import get_hermes_home
 
-LOG_FILE = Path.home() / ".hermes" / "hooks" / "my-hook" / "activity.log"
+LOG_FILE = get_hermes_home() / "hooks" / "my-hook" / "activity.log"
 
 async def handle(event_type: str, context: dict):
     """Called for each subscribed event. Must be named 'handle'."""

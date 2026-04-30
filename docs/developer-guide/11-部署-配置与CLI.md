@@ -14,10 +14,10 @@ Hermes Agent 支持从本地终端到无服务器计算的完整部署谱系：
 
 | 模式 | 启动方式 | 适用场景 |
 |---|---|---|
-| **CLI 交互** | `python cli.py` 或 `hermes` | 本地开发、日常使用 |
-| **单次查询** | `python cli.py -q "问题"` | 脚本集成、批处理 |
+| **CLI 交互** | `hermes` | 本地开发、日常使用 |
+| **单次查询** | `hermes -q "问题"` | 脚本集成、批处理 |
 | **Gateway** | `python -m gateway.run` | 生产部署、多平台接入 |
-| **TUI** | `python -m tui_gateway` | 终端 UI |
+| **TUI** | `hermes --tui` | Ink 终端 UI；Python 侧由 `tui_gateway` 提供 JSON-RPC 后端 |
 | **ACP** | `python -m acp_adapter` | IDE 集成 |
 | **Cron** | `python -m cron.scheduler` | 定时任务专用 |
 | **Docker** | `docker-compose up` | 容器化部署 |
@@ -61,26 +61,22 @@ class HermesCLI:
 | **工具执行状态** | KawaiiSpinner + 动画显示工具调用进度 |
 | **ASCII Banner** | `hermes_cli/banner.py` — 启动艺术字 |
 
-### 2.3 CLI 子命令系统 (hermes_cli/commands.py)
+### 2.3 Slash 命令注册表 (hermes_cli/commands.py)
 
 ```python
-SUBCOMMANDS = {
-    "setup":      # 初始化向导
-    "config":     # 配置管理
-    "doctor":     # 健康检查
-    "model":      # 模型管理
-    "gateway":    # 网关管理
-    "pair":       # 设备配对
-    "skills":     # 技能管理
-    "plugins":    # 插件管理
-    "voice":      # 语音模式
-    "cron":       # 定时任务
-    "web":        # Web 服务器
-    "migrate":    # 数据迁移（从 OpenClaw）
-    "backup":     # 备份恢复
-    "uninstall":  # 清理卸载
-}
+COMMAND_REGISTRY = [
+    CommandDef("new", "Start a new session", "Session", aliases=("reset",)),
+    CommandDef("model", "Switch model for this session", "Configuration"),
+    CommandDef("skills", "Manage skills", "Tools & Skills",
+               subcommands=("list", "install", "enable", "disable")),
+    ...
+]
+
+def resolve_command(name: str) -> CommandDef | None:
+    """解析 canonical name、alias 和带斜杠输入。"""
 ```
+
+`COMMAND_REGISTRY` 是会话内 slash commands 的单一来源。CLI help、gateway dispatch、Telegram BotCommand 菜单、Slack 子命令映射和 autocomplete 都从这里派生。`SUBCOMMANDS` 仍存在，但只是从 `CommandDef.subcommands`/`args_hint` 自动生成的补全辅助表，不是新增命令的入口。
 
 ### 2.4 命令补全 (hermes_cli/completion.py)
 
@@ -153,7 +149,12 @@ security:
 # 日志配置
 logging:
   level: INFO
-  file: ~/.hermes/logs/hermes.log
+  file: ~/.hermes/logs/agent.log
+
+# 插件配置
+plugins:
+  enabled: []
+  disabled: []
 ```
 
 ### 3.3 CLI 配置管理 (hermes_cli/config.py)
@@ -209,7 +210,9 @@ def load_hermes_dotenv(hermes_home, project_env):
   ├── config.yaml              # 用户配置
   ├── .env                     # 环境变量
   ├── logs/                    # 日志
-  │     └── hermes.log
+  │     ├── agent.log
+  │     ├── errors.log
+  │     └── gateway.log
   ├── memory/                  # 记忆存储
   │     ├── user/
   │     ├── project/
@@ -226,17 +229,21 @@ def load_hermes_dotenv(hermes_home, project_env):
   └── .versions/               # 版本管理
 ```
 
-### 5.2 常量
+### 5.2 路径 API
 
 ```python
 # hermes_constants.py
-HERMES_HOME = Path.home() / ".hermes"
-CONFIG_PATH = HERMES_HOME / "config.yaml"
-SKILLS_DIR = HERMES_HOME / "skills"
-MEMORY_DIR = HERMES_HOME / "memory"
-SESSION_DB = HERMES_HOME / "sessions.db"
-LOG_FILE = HERMES_HOME / "logs" / "hermes.log"
+def get_hermes_home() -> Path:
+    """返回当前 profile 的 Hermes home；默认 ~/.hermes，可由 HERMES_HOME 覆盖。"""
+
+def display_hermes_home() -> str:
+    """返回用户可读路径，用于日志/提示文案。"""
+
+def get_default_hermes_root() -> Path:
+    """返回 profile 管理根目录；profile 模式下不是当前 profile home。"""
 ```
+
+代码路径必须用 `get_hermes_home()`，用户可见文案用 `display_hermes_home()`。不要在代码里硬编码 `Path.home() / ".hermes"` 或字符串 `~/.hermes`，否则会破坏 profile 隔离。
 
 ## 6. 健康检查 (hermes_cli/doctor.py)
 
@@ -271,7 +278,7 @@ def run_diagnostics():
 
 ```python
 def create_backup():
-    """备份 ~/.hermes/ 到 tar.gz 归档"""
+    """备份当前 HERMES_HOME 到 tar.gz 归档"""
     backup_path = HERMES_HOME / "backups" / f"hermes-{timestamp}.tar.gz"
     # 打包: config.yaml, memory/, skills/, sessions.db, history
     # 排除: logs/, .versions/, __pycache__/
@@ -280,7 +287,7 @@ def restore_backup(backup_path):
     """从备份恢复"""
     # 1. 解压到临时目录
     # 2. 验证完整性
-    # 3. 替换当前 ~/.hermes/ 内容
+    # 3. 替换当前 HERMES_HOME 内容
     # 4. 保留当前版本作为 .backup 后缀
 ```
 
