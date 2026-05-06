@@ -92,11 +92,13 @@ class GatewayStreamConsumer:
         config: Optional[StreamConsumerConfig] = None,
         metadata: Optional[dict] = None,
         on_new_message: Optional[callable] = None,
+        reply_to_message_id: Optional[str] = None,
     ):
         self.adapter = adapter
         self.chat_id = chat_id
         self.cfg = config or StreamConsumerConfig()
         self.metadata = metadata
+        self.reply_to_message_id = reply_to_message_id
         # Fired whenever a fresh content bubble is created on the platform
         # (first-send of a new message, commentary, overflow chunk, or
         # fallback continuation). The gateway uses this to linearize the
@@ -650,6 +652,7 @@ class GatewayStreamConsumer:
                 result = await self.adapter.send(
                     chat_id=self.chat_id,
                     content=chunk,
+                    reply_to=self.reply_to_message_id,
                     metadata=self.metadata,
                 )
                 if result.success:
@@ -725,6 +728,7 @@ class GatewayStreamConsumer:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
                 content=tail,
+                reply_to=self.reply_to_message_id,
                 metadata=self.metadata,
             )
             if result.success:
@@ -762,6 +766,7 @@ class GatewayStreamConsumer:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
                 content=text,
+                reply_to=self.reply_to_message_id,
                 metadata=self.metadata,
             )
             # Note: do NOT set _already_sent = True here.
@@ -814,6 +819,7 @@ class GatewayStreamConsumer:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
                 content=text,
+                reply_to=self.reply_to_message_id,
                 metadata=self.metadata,
             )
         except Exception as e:
@@ -983,6 +989,7 @@ class GatewayStreamConsumer:
                 result = await self.adapter.send(
                     chat_id=self.chat_id,
                     content=text,
+                    reply_to=self.reply_to_message_id,
                     metadata=self.metadata,
                 )
                 if result.success:
