@@ -16,6 +16,7 @@ Hermes Agent 支持从本地终端到无服务器计算的完整部署谱系：
 |---|---|---|
 | **CLI 交互** | `hermes` | 本地开发、日常使用 |
 | **单次查询** | `hermes -q "问题"` | 脚本集成、批处理 |
+| **直接消息发送** | `hermes send --to telegram "done"` | Shell/CI 脚本向已配置消息平台发通知；不启动 Agent 循环 |
 | **Gateway** | `python -m gateway.run` | 生产部署、多平台接入 |
 | **TUI** | `hermes --tui` | Ink 终端 UI；Python 侧由 `tui_gateway` 提供 JSON-RPC 后端 |
 | **ACP** | `python -m acp_adapter` | IDE 集成 |
@@ -69,6 +70,7 @@ COMMAND_REGISTRY = [
     CommandDef("model", "Switch model for this session", "Configuration"),
     CommandDef("skills", "Manage skills", "Tools & Skills",
                subcommands=("list", "install", "enable", "disable")),
+    CommandDef("update", "Update Hermes Agent to the latest version", "Info"),
     ...
 ]
 
@@ -77,6 +79,11 @@ def resolve_command(name: str) -> CommandDef | None:
 ```
 
 `COMMAND_REGISTRY` 是会话内 slash commands 的单一来源。CLI help、gateway dispatch、Telegram BotCommand 菜单、Slack 子命令映射和 autocomplete 都从这里派生。`SUBCOMMANDS` 仍存在，但只是从 `CommandDef.subcommands`/`args_hint` 自动生成的补全辅助表，不是新增命令的入口。
+
+注意区分两类命令面：
+
+- **会话内 slash command**：加到 `hermes_cli/commands.py::COMMAND_REGISTRY`，并在 `HermesCLI.process_command()`、`gateway/run.py` 或 TUI slash handler 中接入行为。`/update` 属于这一类；TUI 里会用退出码 42 让 Python wrapper 重新 exec `hermes update`。
+- **顶层 CLI subcommand**：加到 `hermes_cli/main.py` 的 argparse 子命令树，必要时拆到独立模块。`hermes send` 属于这一类，实现在 `hermes_cli/send_cmd.py`，用于脚本直接复用平台凭据发送消息，不经过 LLM/Agent。
 
 ### 2.4 命令补全 (hermes_cli/completion.py)
 
@@ -155,7 +162,14 @@ logging:
 plugins:
   enabled: []
   disabled: []
+
+# 更新配置
+updates:
+  pre_update_backup: false
+  backup_keep: 5
 ```
+
+`hermes update` 支持 `--check`、`--backup`、`--no-backup`、`--yes` 和内部使用的 `--gateway`。更新过程会尽量处理 git/ZIP 安装、依赖重装、Node 依赖刷新、旧进程失配和 update log；预更新备份默认关闭，可通过 `updates.pre_update_backup` 或 `--backup` 开启。
 
 ### 3.3 CLI 配置管理 (hermes_cli/config.py)
 
@@ -221,6 +235,7 @@ def load_hermes_dotenv(hermes_home, project_env):
   ├── skills/                  # 用户创建的技能
   ├── skills-hub/              # Skills Hub 安装的技能
   ├── plugins/                 # 用户插件
+  ├── cron/                     # 定时任务、tick lock、作业输出
   ├── sessions.db              # 网关会话 (SQLite)
   ├── history                  # CLI 历史
   │     └── hermes_history
@@ -244,6 +259,8 @@ def get_default_hermes_root() -> Path:
 ```
 
 代码路径必须用 `get_hermes_home()`，用户可见文案用 `display_hermes_home()`。不要在代码里硬编码 `Path.home() / ".hermes"` 或字符串 `~/.hermes`，否则会破坏 profile 隔离。
+
+Cron 也必须按 profile 动态解析 home：`cron/scheduler.py` 的 tick lock、jobs、脚本执行和 per-job `profile` 都会在运行时切换到对应 profile home，并在退出时恢复环境变量快照。不要把 cron 路径缓存成进程级常量。
 
 ## 6. 健康检查 (hermes_cli/doctor.py)
 

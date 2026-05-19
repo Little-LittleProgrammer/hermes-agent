@@ -149,6 +149,8 @@ while self.turn_count < self.max_turns:
 
 它与主 AIAgent 解耦，使用独立的客户端实例，避免污染主对话的状态。
 
+辅助层现在是按任务路由的共享入口，而不是“一个备用 OpenAI 客户端”。`config.yaml` 的 `auxiliary.<task>` 可以分别配置 compression、vision、web_extract、title、curator 等任务的 provider/model/timeout；`agent/auxiliary_client.py` 会按任务配置、主 agent runtime、可用凭据和 fallback 链解析实际客户端。注意 `session_search` 已经不再使用辅助 LLM，它直接读 SQLite/FTS5。
+
 ## 5. 性能优化点
 
 | 优化 | 说明 |

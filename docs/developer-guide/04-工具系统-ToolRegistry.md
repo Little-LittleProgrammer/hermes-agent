@@ -127,6 +127,7 @@ def dispatch(self, name, args, **kwargs):
 | **Web** | `web` | `web_search`（4 种引擎）, `web_extract` |
 | **消息** | `messaging` | `send_message`（跨平台消息推送） |
 | **视觉** | `vision` | `vision_analyze`（图片分析） |
+| **图像/视频生成** | `image_gen`, `video_gen` | `image_generate`, `video_generate` |
 | **代码** | `code` | `execute_code`（沙箱代码执行） |
 | **委派** | `delegate` | `delegate_task`（子代理委派） |
 | **技能** | `skills` | `skills_list`, `skill_view`, `skill_manage` |
@@ -201,6 +202,8 @@ registry.register(
 - **check_fn 不能抛异常**：会被静默吞掉并视为不可用
 - **is_async=True** 标记异步 handler，dispatch 自动桥接
 
+优先判断这是不是应该做成 provider 插件而不是新 core tool：如果只是替换 `web_search`、`web_extract`、云浏览器、`image_generate` 或 `video_generate` 的后端，应实现对应 Provider ABC 并通过插件注册；只有新增独立能力或需要进入核心工具集时才加 `tools/xxx.py`。
+
 ## 7. 关键文件索引
 
 | 文件 | 大小 | 角色 |
@@ -211,6 +214,8 @@ registry.register(
 | `tools/terminal_tool.py` | ~94K | 终端工具（最大工具文件） |
 | `tools/browser_tool.py` | ~116K | 浏览器自动化 |
 | `tools/web_tools.py` | ~88K | Web 搜索与抓取 |
+| `tools/image_generation_tool.py` | ~ | 图像生成工具入口 |
+| `tools/video_generation_tool.py` | ~ | 视频生成工具入口 |
 | `tools/file_tools.py` | ~52K | 文件操作 |
 | `tools/mcp_tool.py` | ~127K | MCP 客户端（动态工具） |
 | `tools/skills_hub.py` | ~119K | 技能市场（安装/卸载） |
